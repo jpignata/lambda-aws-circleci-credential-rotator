@@ -1,0 +1,56 @@
+AWSTemplateFormatVersion: 2010-09-09
+Transform: AWS::Serverless-2016-10-31
+
+Globals:
+  Function:
+    Timeout: 30
+
+Resources:
+  CircleCIConfig:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: CircleCIConfig
+      GenerateSecretString:
+        SecretStringTemplate: "{}"
+        GenerateStringKey: circle-token
+
+  IAMUser:
+    Type: AWS::IAM::User
+    Properties:
+      Policies:
+        - PolicyName: AssumeAllRoles
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              Effect: Allow
+              Action: sts:AssumeRole
+              Resource: "*"
+
+  CircleCICredentialRotator:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: app/
+      Handler: app.handler
+      Runtime: python3.8
+      Environment:
+        Variables:
+          REPO: gh/organization/repo
+          CIRCLECI_CONFIG_SECRET: !Ref CircleCIConfig
+          IAM_USERNAME: !Ref IAMUser
+      Events:
+        Rotate:
+          Type: Schedule
+          Properties:
+            Schedule: cron(0 9 * * ? *)
+      Policies:
+        - Statement:
+          - Effect: Allow
+            Resource: !GetAtt IAMUser.Arn
+            Action:
+              - iam:ListAccessKeys
+              - iam:CreateAccessKey
+              - iam:DeleteAccessKey
+        - Statement:
+            - Effect: Allow
+              Resource: !Ref CircleCIConfig
+              Action: secretsmanager:GetSecretValue
