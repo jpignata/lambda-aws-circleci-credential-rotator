@@ -1,46 +1,39 @@
 import boto3
 import json
 import os
+import random
 import requests
-from typing import List, Tuple
+from time import sleep
+from typing import Dict, Tuple
 
-CIRCLECI_TOKEN_KEY = 'circle-token'
 CIRCLECI_BASE_URL = 'https://circleci.com/api/v2/project'
+CIRCLECI_TOKEN_KEY = 'circle-token'
+MAX_RETRY_COUNT = 15
+MAX_RETRY_WAIT = 10
+SESSION_DURATION_SECONDS = 28800  # 8 hours
 
-iam = boto3.client('iam')
-secretsmanager = boto3.client('secretsmanager')
+CIRCLECI_CONFIG_SECRET = os.environ.get('CIRCLECI_CONFIG_SECRET')
+IAM_USERNAME = os.environ.get('IAM_USERNAME')
+REPO = os.environ.get('REPO')
+
+random.seed()
 
 
-def handler(event, context):
-    username = os.environ.get('IAM_USERNAME')
-    repo = os.environ.get('REPO')
-    circleci_config_secret = os.environ.get('CIRCLECI_CONFIG_SECRET')
-
-    access_key_ids = list_access_key_ids(username)
-    access_key_id, secret_access_key = create_access_key(username)
-    circleci_token = get_secret_value(circleci_config_secret,
-                                      CIRCLECI_TOKEN_KEY)
-
+def handler(event, context, *, iam=boto3.client('iam'), sts=None,
+            secretsmanager=boto3.client('secretsmanager')):
     try:
-        update_env_var('AWS_ACCESS_KEY_ID', access_key_id, repo,
-                       circleci_token)
-        update_env_var('AWS_SECRET_ACCESS_KEY', secret_access_key, repo,
-                       circleci_token)
-    except RuntimeError:
-        iam.delete_access_key(UserName=username, AccessKeyId=access_key_id)
-        raise
-
-    for access_key_id in access_key_ids:
-        iam.delete_access_key(UserName=username, AccessKeyId=access_key_id)
-
-
-def list_access_key_ids(username: str) -> List[str]:
-    response = iam.list_access_keys(UserName=username)
-
-    return [key['AccessKeyId'] for key in response['AccessKeyMetadata']]
+        credentials = create_credentials(IAM_USERNAME, iam=iam)
+        temporary_credentials = create_temporary_credentials(credentials,
+                                                             sts=sts)
+        token = get_secret_value(CIRCLECI_CONFIG_SECRET, CIRCLECI_TOKEN_KEY,
+                                 secretsmanager=secretsmanager)
+        update_envvars(temporary_credentials, token, REPO)
+    finally:
+        iam.delete_access_key(UserName=IAM_USERNAME,
+                              AccessKeyId=credentials[0])
 
 
-def create_access_key(username: str) -> Tuple[str, str]:
+def create_credentials(username: str, *, iam) -> Tuple[str, str]:
     response = iam.create_access_key(UserName=username)
     access_key_id = response['AccessKey']['AccessKeyId']
     secret_access_key = response['AccessKey']['SecretAccessKey']
@@ -48,20 +41,74 @@ def create_access_key(username: str) -> Tuple[str, str]:
     return (access_key_id, secret_access_key)
 
 
-def get_secret_value(key: str, subkey: str) -> str:
+def retry(max_retries=MAX_RETRY_COUNT, max_wait=MAX_RETRY_WAIT, log=True):
+    def logger(*msgs):
+        if log:
+            for msg in msgs:
+                print(msg)
+
+    def wrapper(func):
+        def retryer(*args, **kwargs):
+            for attempt in range(1, max_retries + 1):
+                try:
+                    return func(*args, **kwargs)
+                except Exception as ex:
+                    logger('Exception caught: ', ex)
+
+                    if attempt != max_retries:
+                        secs = random.uniform(0, min(max_wait, 2 ** attempt))
+                        msecs = round(secs * 1000)
+
+                        logger(f'Waiting for {msecs}ms')
+                        sleep(secs)
+                    else:
+                        logger(f'{max_retries} retries failed; bailing')
+                        raise
+        return retryer
+    return wrapper
+
+
+@retry()
+def create_temporary_credentials(credentials: Tuple[str, str], *,
+                                 sts) -> Dict[str, str]:
+    if not sts:
+        sts = boto3.client('sts', aws_access_key_id=credentials[0],
+                           aws_secret_access_key=credentials[1])
+
+    response = sts.get_session_token(DurationSeconds=SESSION_DURATION_SECONDS)
+    credentials = response['Credentials']
+
+    return {'AWS_ACCESS_KEY_ID': credentials['AccessKeyId'],
+            'AWS_SECRET_ACCESS_KEY': credentials['SecretAccessKey'],
+            'AWS_SESSION_TOKEN': credentials['SessionToken']}
+
+
+def get_secret_value(key: str, subkey: str, *,
+                     secretsmanager) -> str:
     response = secretsmanager.get_secret_value(SecretId=key)
     config = json.loads(response['SecretString'])
 
     return config[subkey]
 
 
-def update_env_var(key: str, value: str, repo: str, token: str) -> None:
+def update_envvars(temporary_credentials: Dict[str, str], token: str,
+                   repo: str, *, max_retries=MAX_RETRY_COUNT,
+                   max_wait=MAX_RETRY_WAIT, log=True) -> None:
+    url = f'{CIRCLECI_BASE_URL}/{repo}/envvar'
     headers = {'Circle-Token': token}
-    payload = {'name': key, 'value': value}
-    url = f'{CIRCLECI_BASE_URL}/{repo}/envvar?circle-token={token}'
-    response = requests.post(url, json=payload, headers=headers)
 
-    if response.status_code != 201:
-        raise RuntimeError('Could not update environment variable ' +
-                           f'status_code={response.status_code} ' +
-                           f'body={response.content}')
+    @retry(max_retries=max_retries, max_wait=max_wait, log=log)
+    def update(key: str, value: str) -> None:
+        payload = {'name': key, 'value': value}
+        response = requests.post(url, json=payload, headers=headers)
+
+        if response.status_code != 201:
+            safe_content = response.content.replace(value, '*' * len(value))
+
+            raise RuntimeError('Could not update envvar ' +
+                               f'key={key} ' +
+                               f'status_code={response.status_code} ' +
+                               f'body={safe_content}')
+
+    for key, value in temporary_credentials.items():
+        update(key, value)

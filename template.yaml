@@ -3,7 +3,7 @@ Transform: AWS::Serverless-2016-10-31
 
 Globals:
   Function:
-    Timeout: 30
+    Timeout: 600
 
 Resources:
   CircleCIConfig:
@@ -18,13 +18,16 @@ Resources:
     Type: AWS::IAM::User
     Properties:
       Policies:
-        - PolicyName: AssumeAllRoles
+        - PolicyName: AssumeIntegrationTestsRoles
           PolicyDocument:
             Version: 2012-10-17
             Statement:
               Effect: Allow
               Action: sts:AssumeRole
               Resource: "*"
+              Condition:
+                StringEquals:
+                  "iam:ResourceTag/Usage": IntegrationTests
 
   CircleCICredentialRotator:
     Type: AWS::Serverless::Function
@@ -41,13 +44,12 @@ Resources:
         Rotate:
           Type: Schedule
           Properties:
-            Schedule: cron(0 9 * * ? *)
+            Schedule: cron(0 * * * ? *)
       Policies:
         - Statement:
           - Effect: Allow
             Resource: !GetAtt IAMUser.Arn
             Action:
-              - iam:ListAccessKeys
               - iam:CreateAccessKey
               - iam:DeleteAccessKey
         - Statement:
