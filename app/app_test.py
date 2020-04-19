@@ -8,7 +8,8 @@ from unittest.mock import patch, Mock, call
 
 import app
 
-# IAM materials for stubs
+# IAM materials for stubs. These are not real credentials, rather they are
+# conventional examples used in AWS documentation. See https://bit.ly/2XsAkBq.
 session = botocore.session.get_session()
 access_key_id = 'AKIAIOSFODNN7EXAMPLE'
 secret_access_key = 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYzEXAMPLEKEY'
