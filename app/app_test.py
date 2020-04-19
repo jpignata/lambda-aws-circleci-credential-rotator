@@ -86,11 +86,8 @@ class TestApp(unittest.TestCase):
 
     @patch('app.create_temporary_credentials')
     def test_handler_deletes_access_key_upon_exception(self, stub):
-        # Override app constants
-        app.IAM_USERNAME = app.IAM_USERNAME
-        # IAM stub
+        stub.side_effect = Exception
         iam = session.create_client('iam')
-        stubber = Stubber(iam)
         create_request = {'UserName': app.IAM_USERNAME}
         create_response = {'AccessKey': {'UserName': app.IAM_USERNAME,
                                          'AccessKeyId': access_key_id,
@@ -98,33 +95,29 @@ class TestApp(unittest.TestCase):
                                          'SecretAccessKey': secret_access_key}}
         delete_request = {'UserName': app.IAM_USERNAME,
                           'AccessKeyId': access_key_id}
-        stubber.add_response('create_access_key', create_response,
-                             create_request)
-        stubber.add_response('delete_access_key', {}, delete_request)
-        stubber.activate()
-        # Setup app.create_temporary_credentials stub
-        stub.side_effect = Exception
 
-        with self.assertRaises(Exception):
-            app.handler({}, {}, iam=iam)
+        with Stubber(iam) as stubber:
+            stubber.add_response('create_access_key', create_response,
+                                 create_request)
+            stubber.add_response('delete_access_key', {}, delete_request)
 
-        stubber.assert_no_pending_responses()
+            with self.assertRaises(Exception):
+                app.handler({}, {}, iam=iam)
+
+            stubber.assert_no_pending_responses()
 
     def test_create_credentials_returns_credentials(self):
-        # IAM stub
         iam = session.create_client('iam')
-        stubber = Stubber(iam)
         request = {'UserName': app.IAM_USERNAME}
         response = {'AccessKey': {'UserName': app.IAM_USERNAME,
                                   'AccessKeyId': access_key_id,
                                   'Status': 'Active',
                                   'SecretAccessKey': secret_access_key}}
-        stubber.add_response('create_access_key', response, request)
-        stubber.activate()
 
-        credentials = app.create_credentials(app.IAM_USERNAME, iam=iam)
-
-        self.assertEqual(credentials, (access_key_id, secret_access_key))
+        with Stubber(iam) as stubber:
+            stubber.add_response('create_access_key', response, request)
+            credentials = app.create_credentials(app.IAM_USERNAME, iam=iam)
+            self.assertEqual(credentials, (access_key_id, secret_access_key))
 
     def test_retry_retries(self):
         self.retries = 0
@@ -149,67 +142,62 @@ class TestApp(unittest.TestCase):
 
         with self.assertRaises(RuntimeError):
             exercise()
+
         self.assertEqual(self.retries, app.MAX_RETRY_COUNT)
 
     def test_get_secrets_value_returns_secret_value(self):
-        # SecretsManager stub
         secretsmanager = session.create_client('secretsmanager')
-        stubber = Stubber(secretsmanager)
         request = {'SecretId': 'key'}
         response = {'SecretString': '{"subkey":"SEKRET!"}'}
-        stubber.add_response('get_secret_value', response, request)
-        stubber.activate()
 
-        secret = app.get_secret_value('key', 'subkey',
-                                      secretsmanager=secretsmanager)
+        with Stubber(secretsmanager) as stubber:
+            stubber.add_response('get_secret_value', response, request)
+            secret = app.get_secret_value('key', 'subkey',
+                                          secretsmanager=secretsmanager)
 
-        self.assertEqual(secret, 'SEKRET!')
+            self.assertEqual(secret, 'SEKRET!')
 
     def test_get_secrets_value_with_missing_subkey_raises_keyerror(self):
-        # SecretsManager stub
         secretsmanager = session.create_client('secretsmanager')
-        stubber = Stubber(secretsmanager)
         request = {'SecretId': 'key'}
         response = {'SecretString': '{}'}
-        stubber.add_response('get_secret_value', response, request)
-        stubber.activate()
 
-        with self.assertRaises(KeyError):
-            app.get_secret_value('key', 'key', secretsmanager=secretsmanager)
+        with Stubber(secretsmanager) as stubber:
+            stubber.add_response('get_secret_value', response, request)
+
+            with self.assertRaises(KeyError):
+                app.get_secret_value('key', 'key',
+                                     secretsmanager=secretsmanager)
 
     def test_get_secrets_value_with_missing_subkey_raises_jsonerror(self):
-        # SecretsManager stub
         secretsmanager = session.create_client('secretsmanager')
-        stubber = Stubber(secretsmanager)
         request = {'SecretId': 'key'}
         response = {'SecretString': ''}
-        stubber.add_response('get_secret_value', response, request)
-        stubber.activate()
 
-        with self.assertRaises(json.decoder.JSONDecodeError):
-            app.get_secret_value('key', 'key', secretsmanager=secretsmanager)
+        with Stubber(secretsmanager) as stubber:
+            stubber.add_response('get_secret_value', response, request)
+
+            with self.assertRaises(json.decoder.JSONDecodeError):
+                app.get_secret_value('key', 'key',
+                                     secretsmanager=secretsmanager)
 
     def test_create_temporary_credentials_returns_temporary_credentials(self):
-        # STS stub
-        credentials = (access_key_id, secret_access_key)
-        expiration = datetime(2015, 1, 1)
         sts = session.create_client('sts')
-        stubber = Stubber(sts)
         request = {'DurationSeconds': app.SESSION_DURATION_SECONDS}
         response = {'Credentials': {'AccessKeyId': access_key_id,
                                     'SecretAccessKey': secret_access_key,
                                     'SessionToken': session_token,
                                     'Expiration': expiration}}
-        stubber.add_response('get_session_token', response, request)
-        stubber.activate()
+        credentials = (access_key_id, secret_access_key)
 
-        temporary_credentials = app.create_temporary_credentials(credentials,
-                                                                 sts=sts)
-
-        expected = {'AWS_ACCESS_KEY_ID': access_key_id,
-                    'AWS_SECRET_ACCESS_KEY': secret_access_key,
-                    'AWS_SESSION_TOKEN': session_token}
-        self.assertEqual(temporary_credentials, expected)
+        with Stubber(sts) as stubber:
+            stubber.add_response('get_session_token', response, request)
+            temp_credentials = app.create_temporary_credentials(credentials,
+                                                                sts=sts)
+            expected = {'AWS_ACCESS_KEY_ID': access_key_id,
+                        'AWS_SECRET_ACCESS_KEY': secret_access_key,
+                        'AWS_SESSION_TOKEN': session_token}
+            self.assertEqual(temp_credentials, expected)
 
     @patch('app.requests.post')
     def test_update_envvars_posts_http_requests(self, post):
