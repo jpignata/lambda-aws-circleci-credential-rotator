@@ -10,7 +10,6 @@ import app
 
 # IAM materials for stubs. These are not real credentials, rather they are
 # conventional examples used in AWS documentation. See https://bit.ly/2XsAkBq.
-session = botocore.session.get_session()
 access_key_id = 'AKIAIOSFODNN7EXAMPLE'
 secret_access_key = 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYzEXAMPLEKEY'
 session_token = 'AQoDYXdzEPT//////////wEXAMPLEtc764bNrC9SAPBSM22wDOk' + \
@@ -28,27 +27,33 @@ app.CIRCLECI_CONFIG_SECRET = 'shhh'
 app.REPO = 'jpignata/thingie'
 app.SESSION_DURATION_SECONDS = 900
 
+# Clients
+session = botocore.session.get_session()
+iam = session.create_client('iam')
+secretsmanager = session.create_client('secretsmanager')
+sts = session.create_client('sts')
+
 
 class TestApp(unittest.TestCase):
     @patch('app.requests.post')
     def test_handler_rotates_credentials(self, post):
-        # IAM stubs
-        iam = session.create_client('iam')
+        # Initializer stubbers
         iam_stubber = Stubber(iam)
-        create_request = {'UserName': app.IAM_USERNAME}
-        create_response = {'AccessKey': {'UserName': app.IAM_USERNAME,
+        sts_stubber = Stubber(sts)
+        secretsmanager_stubber = Stubber(secretsmanager)
+        stubbers = [iam_stubber, sts_stubber, secretsmanager_stubber]
+        # IAM stubs
+        create_request = {'UserName': 'username'}
+        create_response = {'AccessKey': {'UserName': 'username',
                                          'AccessKeyId': access_key_id,
                                          'Status': 'Active',
                                          'SecretAccessKey': secret_access_key}}
-        delete_request = {'UserName': app.IAM_USERNAME,
+        delete_request = {'UserName': 'username',
                           'AccessKeyId': access_key_id}
         iam_stubber.add_response('create_access_key', create_response,
                                  create_request)
         iam_stubber.add_response('delete_access_key', {}, delete_request)
-        iam_stubber.activate()
         # STS stub
-        sts = session.create_client('sts')
-        sts_stubber = Stubber(sts)
         sts_request = {'DurationSeconds': 900}
         sts_response = {'Credentials': {'AccessKeyId': access_key_id,
                                         'SecretAccessKey': secret_access_key,
@@ -56,24 +61,21 @@ class TestApp(unittest.TestCase):
                                         'Expiration': expiration}}
         sts_stubber.add_response('get_session_token', sts_response,
                                  sts_request)
-        sts_stubber.activate()
         # SecretsManager stub
-        secretsmanager = session.create_client('secretsmanager')
-        secretsmanager_stubber = Stubber(secretsmanager)
         request = {'SecretId': 'shhh'}
         response = {'SecretString': '{"circle-token":"SEKRET!"}'}
         secretsmanager_stubber.add_response('get_secret_value', response,
                                             request)
-        secretsmanager_stubber.activate()
         # Requests stub
         post.return_value = Mock()
         post.return_value.status_code = 201
 
+        for stubber in stubbers:
+            stubber.activate()
         app.handler({}, {}, iam=iam, secretsmanager=secretsmanager, sts=sts)
 
-        iam_stubber.assert_no_pending_responses()
-        sts_stubber.assert_no_pending_responses()
-        secretsmanager_stubber.assert_no_pending_responses()
+        for stubber in stubbers:
+            stubber.assert_no_pending_responses()
         url = 'https://circleci.com/api/v2/project/jpignata/thingie/envvar'
         header = {'Circle-Token': 'SEKRET!'}
         values = {'AWS_ACCESS_KEY_ID': access_key_id,
@@ -87,13 +89,12 @@ class TestApp(unittest.TestCase):
     @patch('app.create_temporary_credentials')
     def test_handler_deletes_access_key_upon_exception(self, stub):
         stub.side_effect = Exception
-        iam = session.create_client('iam')
-        create_request = {'UserName': app.IAM_USERNAME}
-        create_response = {'AccessKey': {'UserName': app.IAM_USERNAME,
+        create_request = {'UserName': 'username'}
+        create_response = {'AccessKey': {'UserName': 'username',
                                          'AccessKeyId': access_key_id,
                                          'Status': 'Active',
                                          'SecretAccessKey': secret_access_key}}
-        delete_request = {'UserName': app.IAM_USERNAME,
+        delete_request = {'UserName': 'username',
                           'AccessKeyId': access_key_id}
 
         with Stubber(iam) as stubber:
@@ -107,16 +108,15 @@ class TestApp(unittest.TestCase):
             stubber.assert_no_pending_responses()
 
     def test_create_credentials_returns_credentials(self):
-        iam = session.create_client('iam')
-        request = {'UserName': app.IAM_USERNAME}
-        response = {'AccessKey': {'UserName': app.IAM_USERNAME,
+        request = {'UserName': 'username'}
+        response = {'AccessKey': {'UserName': 'username',
                                   'AccessKeyId': access_key_id,
                                   'Status': 'Active',
                                   'SecretAccessKey': secret_access_key}}
 
         with Stubber(iam) as stubber:
             stubber.add_response('create_access_key', response, request)
-            credentials = app.create_credentials(app.IAM_USERNAME, iam=iam)
+            credentials = app.create_credentials('username', iam=iam)
             self.assertEqual(credentials, (access_key_id, secret_access_key))
 
     def test_retry_retries(self):
@@ -135,7 +135,7 @@ class TestApp(unittest.TestCase):
     def test_retry_raises_exception_if_retried_max_attempts(self):
         self.retries = 0
 
-        @app.retry(max_wait=0.001, log=False)
+        @app.retry(max_attempts=3, max_wait=0.001, log=False)
         def exercise():
             self.retries += 1
             raise RuntimeError
@@ -143,10 +143,9 @@ class TestApp(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             exercise()
 
-        self.assertEqual(self.retries, app.MAX_RETRY_COUNT)
+        self.assertEqual(self.retries, 3)
 
     def test_get_secrets_value_returns_secret_value(self):
-        secretsmanager = session.create_client('secretsmanager')
         request = {'SecretId': 'key'}
         response = {'SecretString': '{"subkey":"SEKRET!"}'}
 
@@ -158,7 +157,6 @@ class TestApp(unittest.TestCase):
             self.assertEqual(secret, 'SEKRET!')
 
     def test_get_secrets_value_with_missing_subkey_raises_keyerror(self):
-        secretsmanager = session.create_client('secretsmanager')
         request = {'SecretId': 'key'}
         response = {'SecretString': '{}'}
 
@@ -170,7 +168,6 @@ class TestApp(unittest.TestCase):
                                      secretsmanager=secretsmanager)
 
     def test_get_secrets_value_with_missing_subkey_raises_jsonerror(self):
-        secretsmanager = session.create_client('secretsmanager')
         request = {'SecretId': 'key'}
         response = {'SecretString': ''}
 
@@ -182,8 +179,7 @@ class TestApp(unittest.TestCase):
                                      secretsmanager=secretsmanager)
 
     def test_create_temporary_credentials_returns_temporary_credentials(self):
-        sts = session.create_client('sts')
-        request = {'DurationSeconds': app.SESSION_DURATION_SECONDS}
+        request = {'DurationSeconds': 900}
         response = {'Credentials': {'AccessKeyId': access_key_id,
                                     'SecretAccessKey': secret_access_key,
                                     'SessionToken': session_token,
@@ -223,13 +219,14 @@ class TestApp(unittest.TestCase):
 
             try:
                 app.update_envvars({'key': 'secret'}, 'token',
-                                    'jpignata/thingie', max_retries=1,
-                                    max_wait=0.001, log=False)
+                                   'jpignata/thingie', max_attempts=1,
+                                   max_wait=0.001, log=False)
             except Exception as err:
                 exception = err
 
         self.assertNotRegex(str(exception), 'secret')
-        self.assertRegex(str(exception), 'this would log a \*{5}')
+        self.assertRegex(str(exception), r'this would log a \*{5}')
+
 
 if __name__ == '__main__':
     unittest.main()

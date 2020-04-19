@@ -8,7 +8,7 @@ from typing import Dict, Tuple
 
 CIRCLECI_BASE_URL = 'https://circleci.com/api/v2/project'
 CIRCLECI_TOKEN_KEY = 'circle-token'
-MAX_RETRY_COUNT = 15
+MAX_RETRY_ATTEMPTS = 15
 MAX_RETRY_WAIT = 10
 SESSION_DURATION_SECONDS = 28800  # 8 hours
 
@@ -41,7 +41,7 @@ def create_credentials(username: str, *, iam) -> Tuple[str, str]:
     return (access_key_id, secret_access_key)
 
 
-def retry(max_retries=MAX_RETRY_COUNT, max_wait=MAX_RETRY_WAIT, log=True):
+def retry(max_attempts=MAX_RETRY_ATTEMPTS, max_wait=MAX_RETRY_WAIT, log=True):
     def logger(*msgs):
         if log:
             for msg in msgs:
@@ -49,20 +49,20 @@ def retry(max_retries=MAX_RETRY_COUNT, max_wait=MAX_RETRY_WAIT, log=True):
 
     def wrapper(func):
         def retryer(*args, **kwargs):
-            for attempt in range(1, max_retries + 1):
+            for attempt in range(1, max_attempts + 1):
                 try:
                     return func(*args, **kwargs)
                 except Exception as ex:
                     logger('Exception caught: ', ex)
 
-                    if attempt != max_retries:
+                    if attempt != max_attempts:
                         secs = random.uniform(0, min(max_wait, 2 ** attempt))
                         msecs = round(secs * 1000)
 
                         logger(f'Waiting for {msecs}ms')
                         sleep(secs)
                     else:
-                        logger(f'{max_retries} retries failed; bailing')
+                        logger(f'{max_attempts} retries failed; bailing')
                         raise
         return retryer
     return wrapper
@@ -92,12 +92,12 @@ def get_secret_value(key: str, subkey: str, *,
 
 
 def update_envvars(temporary_credentials: Dict[str, str], token: str,
-                   repo: str, *, max_retries=MAX_RETRY_COUNT,
+                   repo: str, *, max_attempts=MAX_RETRY_ATTEMPTS,
                    max_wait=MAX_RETRY_WAIT, log=True) -> None:
     url = f'{CIRCLECI_BASE_URL}/{repo}/envvar'
     headers = {'Circle-Token': token}
 
-    @retry(max_retries=max_retries, max_wait=max_wait, log=log)
+    @retry(max_attempts=max_attempts, max_wait=max_wait, log=log)
     def update(key: str, value: str) -> None:
         payload = {'name': key, 'value': value}
         response = requests.post(url, json=payload, headers=headers)
