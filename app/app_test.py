@@ -8,6 +8,7 @@ from unittest.mock import patch, Mock, call
 
 import app
 
+# IAM materials for stubs
 session = botocore.session.get_session()
 access_key_id = 'AKIAIOSFODNN7EXAMPLE'
 secret_access_key = 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYzEXAMPLEKEY'
@@ -20,30 +21,31 @@ session_token = 'AQoDYXdzEPT//////////wEXAMPLEtc764bNrC9SAPBSM22wDOk' + \
                 '4rvx3iSIlTJabIQwj2ICCR/oLxBA=='
 expiration = datetime(2015, 1, 1)
 
+# Override app constants
+app.IAM_USERNAME = 'username'
+app.CIRCLECI_CONFIG_SECRET = 'shhh'
+app.REPO = 'jpignata/thingie'
+app.SESSION_DURATION_SECONDS = 900
+
 
 class TestApp(unittest.TestCase):
     @patch('app.requests.post')
     def test_handler_rotates_credentials(self, post):
-        # Override app constants
-        app.IAM_USERNAME = 'bofh'
-        app.CIRCLECI_CONFIG_SECRET = 'shhh'
-        app.REPO = 'jpignata/thingie'
-        app.SESSION_DURATION_SECONDS = 900
-        # Locals for mocks
-        # IAM mocks
+        # IAM stubs
         iam = session.create_client('iam')
         iam_stubber = Stubber(iam)
-        create_request = {'UserName': 'bofh'}
-        create_response = {'AccessKey': {'UserName': 'bofh',
+        create_request = {'UserName': app.IAM_USERNAME}
+        create_response = {'AccessKey': {'UserName': app.IAM_USERNAME,
                                          'AccessKeyId': access_key_id,
                                          'Status': 'Active',
                                          'SecretAccessKey': secret_access_key}}
+        delete_request = {'UserName': app.IAM_USERNAME,
+                          'AccessKeyId': access_key_id}
         iam_stubber.add_response('create_access_key', create_response,
                                  create_request)
-        delete_request = {'UserName': 'bofh', 'AccessKeyId': access_key_id}
         iam_stubber.add_response('delete_access_key', {}, delete_request)
         iam_stubber.activate()
-        # STS mock
+        # STS stub
         sts = session.create_client('sts')
         sts_stubber = Stubber(sts)
         sts_request = {'DurationSeconds': 900}
@@ -54,7 +56,7 @@ class TestApp(unittest.TestCase):
         sts_stubber.add_response('get_session_token', sts_response,
                                  sts_request)
         sts_stubber.activate()
-        # SecretsManager mock
+        # SecretsManager stub
         secretsmanager = session.create_client('secretsmanager')
         secretsmanager_stubber = Stubber(secretsmanager)
         request = {'SecretId': 'shhh'}
@@ -62,12 +64,11 @@ class TestApp(unittest.TestCase):
         secretsmanager_stubber.add_response('get_secret_value', response,
                                             request)
         secretsmanager_stubber.activate()
-        # Requests mock
+        # Requests stub
         post.return_value = Mock()
         post.return_value.status_code = 201
 
-        app.handler(None, None, iam=iam, secretsmanager=secretsmanager,
-                    sts=sts)
+        app.handler({}, {}, iam=iam, secretsmanager=secretsmanager, sts=sts)
 
         iam_stubber.assert_no_pending_responses()
         sts_stubber.assert_no_pending_responses()
@@ -83,43 +84,44 @@ class TestApp(unittest.TestCase):
             self.assertEqual(post.mock_calls[i], expected)
 
     @patch('app.create_temporary_credentials')
-    def test_handler_deletes_access_key_upon_exception(self, mock):
+    def test_handler_deletes_access_key_upon_exception(self, stub):
         # Override app constants
-        app.IAM_USERNAME = 'bofh'
-        # IAM mock
+        app.IAM_USERNAME = app.IAM_USERNAME
+        # IAM stub
         iam = session.create_client('iam')
         stubber = Stubber(iam)
-        create_request = {'UserName': 'bofh'}
-        create_response = {'AccessKey': {'UserName': 'bofh',
+        create_request = {'UserName': app.IAM_USERNAME}
+        create_response = {'AccessKey': {'UserName': app.IAM_USERNAME,
                                          'AccessKeyId': access_key_id,
                                          'Status': 'Active',
                                          'SecretAccessKey': secret_access_key}}
+        delete_request = {'UserName': app.IAM_USERNAME,
+                          'AccessKeyId': access_key_id}
         stubber.add_response('create_access_key', create_response,
                              create_request)
-        delete_request = {'UserName': 'bofh', 'AccessKeyId': access_key_id}
         stubber.add_response('delete_access_key', {}, delete_request)
         stubber.activate()
-        # Raise exception during `handle()`
-        mock.side_effect = Exception
+        # Setup app.create_temporary_credentials stub
+        stub.side_effect = Exception
 
         with self.assertRaises(Exception):
-            app.handler(None, None, iam=iam)
+            app.handler({}, {}, iam=iam)
 
         stubber.assert_no_pending_responses()
 
     def test_create_credentials_returns_credentials(self):
-        # IAM mock
+        # IAM stub
         iam = session.create_client('iam')
         stubber = Stubber(iam)
-        request = {'UserName': 'bofh'}
-        response = {'AccessKey': {'UserName': 'bofh',
+        request = {'UserName': app.IAM_USERNAME}
+        response = {'AccessKey': {'UserName': app.IAM_USERNAME,
                                   'AccessKeyId': access_key_id,
                                   'Status': 'Active',
                                   'SecretAccessKey': secret_access_key}}
         stubber.add_response('create_access_key', response, request)
         stubber.activate()
 
-        credentials = app.create_credentials('bofh', iam=iam)
+        credentials = app.create_credentials(app.IAM_USERNAME, iam=iam)
 
         self.assertEqual(credentials, (access_key_id, secret_access_key))
 
@@ -137,15 +139,19 @@ class TestApp(unittest.TestCase):
         self.assertEqual(exercise(), 'all good!')
 
     def test_retry_raises_exception_if_retried_max_attempts(self):
+        self.retries = 0
+
         @app.retry(max_wait=0.001, log=False)
         def exercise():
+            self.retries += 1
             raise RuntimeError
 
         with self.assertRaises(RuntimeError):
             exercise()
+        self.assertEqual(self.retries, app.MAX_RETRY_COUNT)
 
     def test_get_secrets_value_returns_secret_value(self):
-        # SecretsManager mock
+        # SecretsManager stub
         secretsmanager = session.create_client('secretsmanager')
         stubber = Stubber(secretsmanager)
         request = {'SecretId': 'key'}
@@ -159,7 +165,7 @@ class TestApp(unittest.TestCase):
         self.assertEqual(secret, 'SEKRET!')
 
     def test_get_secrets_value_with_missing_subkey_raises_keyerror(self):
-        # SecretsManager mock
+        # SecretsManager stub
         secretsmanager = session.create_client('secretsmanager')
         stubber = Stubber(secretsmanager)
         request = {'SecretId': 'key'}
@@ -171,7 +177,7 @@ class TestApp(unittest.TestCase):
             app.get_secret_value('key', 'key', secretsmanager=secretsmanager)
 
     def test_get_secrets_value_with_missing_subkey_raises_jsonerror(self):
-        # SecretsManager mock
+        # SecretsManager stub
         secretsmanager = session.create_client('secretsmanager')
         stubber = Stubber(secretsmanager)
         request = {'SecretId': 'key'}
@@ -183,7 +189,7 @@ class TestApp(unittest.TestCase):
             app.get_secret_value('key', 'key', secretsmanager=secretsmanager)
 
     def test_create_temporary_credentials_returns_temporary_credentials(self):
-        # STS mock
+        # STS stub
         credentials = (access_key_id, secret_access_key)
         expiration = datetime(2015, 1, 1)
         sts = session.create_client('sts')
